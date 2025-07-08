@@ -80,7 +80,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     
     // CSV Export Queue System
     private static final int BATCH_SIZE = 1000;
-    private static final String CSV_FILE_PATH = "queryOutput.csv";
+    private static final String CSV_FILE_PATH = "queryMetricsOutput.csv";
     private final BlockingQueue<SearchQueryRecord> csvExportQueue = new LinkedBlockingQueue<>();
     private final AtomicBoolean csvHeaderWritten = new AtomicBoolean(false);
 
@@ -293,9 +293,12 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
+        log.info("CSV Export: constructSearchQueryRecord called");
         if (skipSearchRequest(searchRequestContext)) {
+            log.info("CSV Export: Skipping search request");
             return;
         }
+        log.info("CSV Export: Processing search request");
 
         SearchTask searchTask = context.getTask();
         List<TaskResourceInfo> tasksResourceUsages = searchRequestContext.getPhaseResourceUsage();
@@ -405,7 +408,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
      */
     private void queueRecordForCsvExport(SearchQueryRecord record) {
         try {
-            csvExportQueue.offer(record);
+            boolean queued = csvExportQueue.offer(record);
+            log.info("CSV Export: Queued record {} - Queue size: {}", queued, csvExportQueue.size());
         } catch (Exception e) {
             log.warn("Failed to queue record for CSV export: {}", e.getMessage());
         }
@@ -415,8 +419,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
      * Start the CSV export processor using query insights thread pool
      */
     private void startCsvExportProcessor() {
+        log.info("CSV Export: Starting CSV export processor");
         // Use the cluster service's thread pool with the query insights executor
         clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> {
+            log.info("CSV Export: CSV export processor thread started");
             List<SearchQueryRecord> batch = new ArrayList<>();
             
             while (!Thread.currentThread().isInterrupted()) {
@@ -424,6 +430,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     // Wait for records and batch them
                     SearchQueryRecord record = csvExportQueue.take();
                     batch.add(record);
+                    log.info("CSV Export: Processing batch with {} records", batch.size());
                     
                     // Drain additional records up to batch size
                     csvExportQueue.drainTo(batch, BATCH_SIZE - 1);
@@ -446,14 +453,19 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
      * Write a batch of records to CSV file
      */
     private void writeBatchToCsv(List<SearchQueryRecord> records) {
-        if (records.isEmpty()) return;
+        if (records.isEmpty()) {
+            log.info("CSV Export: Empty batch, skipping write");
+            return;
+        }
         
         try {
             Path csvPath = Paths.get(CSV_FILE_PATH);
+            log.info("CSV Export: Writing {} records to {}", records.size(), csvPath.toAbsolutePath());
             
             // Write CSV header if this is the first write
             if (csvHeaderWritten.compareAndSet(false, true)) {
                 Files.write(csvPath, "timestamp,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n".getBytes());
+                log.info("CSV Export: Header written to file");
             }
             
             // Prepare batch data
@@ -464,6 +476,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             
             // Append batch to file
             Files.write(csvPath, csvData.toString().getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            log.info("CSV Export: Successfully wrote batch to file");
             
         } catch (IOException e) {
             log.error("Failed to write CSV batch: {}", e.getMessage());
