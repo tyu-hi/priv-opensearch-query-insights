@@ -73,6 +73,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     
     // CSV Export
     private static final String CSV_FILE_PATH = "queryOutput.csv";
+    private static final String QUERY_JSON_FILE_PATH = "queryDetails.json";
     private final List<SearchQueryRecord> csvBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
 
@@ -429,17 +430,18 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
     
     private void writeCsvBatch(List<SearchQueryRecord> records) {
-        log.info("Writing {} records to CSV file: {}", records.size(), CSV_FILE_PATH);
-        try (java.io.FileWriter writer = new java.io.FileWriter(CSV_FILE_PATH, true)) {
-            // Write header if file is empty
-            java.io.File file = new java.io.File(CSV_FILE_PATH);
-            if (file.length() == 0) {
-                writer.append("timestamp,query_type,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n");
+        log.info("Writing {} records to CSV and JSON files", records.size());
+        
+        // Write CSV metrics
+        try (java.io.FileWriter csvWriter = new java.io.FileWriter(CSV_FILE_PATH, true)) {
+            java.io.File csvFile = new java.io.File(CSV_FILE_PATH);
+            if (csvFile.length() == 0) {
+                csvWriter.append("timestamp,query_type,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n");
             }
             
             for (SearchQueryRecord record : records) {
                 String queryType = getQueryType(record);
-                writer.append(String.format("%d,%s,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
+                csvWriter.append(String.format("%d,%s,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
                     record.getTimestamp(),
                     queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
@@ -451,10 +453,25 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     record.getAttributes().get(Attribute.NODE_ID)
                 ));
             }
-            log.info("Successfully wrote CSV batch");
         } catch (IOException e) {
-            log.error("Failed to write CSV batch: {}", e.getMessage());
+            log.error("Failed to write CSV: {}", e.getMessage());
         }
+        
+        // Write JSON queries
+        try (java.io.FileWriter jsonWriter = new java.io.FileWriter(QUERY_JSON_FILE_PATH, true)) {
+            for (SearchQueryRecord record : records) {
+                Object source = record.getAttributes().get(Attribute.SOURCE);
+                String queryJson = source != null ? source.toString() : "{}";
+                jsonWriter.append(String.format("{\"timestamp\":%d,\"query\":%s}\n",
+                    record.getTimestamp(),
+                    queryJson
+                ));
+            }
+        } catch (IOException e) {
+            log.error("Failed to write JSON: {}", e.getMessage());
+        }
+        
+        log.info("Successfully wrote CSV and JSON files");
     }
     
     private String getQueryType(SearchQueryRecord record) {
