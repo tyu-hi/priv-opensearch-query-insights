@@ -261,6 +261,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             .map(SearchRequest::source)
             .map(SearchSourceBuilder::profile)
             .orElse(false)) {
+            log.info("Skipping profile query");
             return true;
         }
 
@@ -268,10 +269,19 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             return false;
         }
 
-        return Optional.ofNullable(searchRequestContext)
+        boolean shouldSkip = Optional.ofNullable(searchRequestContext)
             .map(SearchRequestContext::getSuccessfulSearchShardIndices)
-            .map(indices -> indices.stream().map(Index::getName).anyMatch(this::matchedExcludedIndices))
+            .map(indices -> {
+                String indexNames = indices.stream().map(Index::getName).collect(Collectors.joining(","));
+                log.info("Checking indices: {}", indexNames);
+                return indices.stream().map(Index::getName).anyMatch(this::matchedExcludedIndices);
+            })
             .orElse(false);
+        
+        if (shouldSkip) {
+            log.info("Skipping excluded indices");
+        }
+        return shouldSkip;
     }
 
     private boolean matchedExcludedIndices(String indexName) {
@@ -282,6 +292,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
+        String indices = Optional.ofNullable(context.getRequest().indices())
+            .map(arr -> String.join(",", arr))
+            .orElse("unknown");
+        log.info("Processing search request for indices: {}", indices);
+        
         if (skipSearchRequest(searchRequestContext)) {
             return;
         }
@@ -363,6 +378,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             queryInsightsService.addRecord(record);
             
             // Export to CSV asynchronously
+            log.info("Exporting query for indices: {}", String.join(",", request.indices()));
             exportToCsvAsync(record);
             
         } catch (Exception e) {
@@ -389,6 +405,18 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
 
+    private boolean isRangeQuery(SearchRequest request) {
+        if (request.source() == null) {
+            log.info("No query source found");
+            return false;
+        }
+        String queryString = request.source().toString();
+        log.info("Query source: {}", queryString);
+        boolean isRange = queryString.contains("range") || queryString.contains("Range");
+        log.info("Is range query: {}", isRange);
+        return isRange;
+    }
+    
     private synchronized void exportToCsvAsync(SearchQueryRecord record) {
         log.info("Adding record to CSV buffer");
         csvBuffer.add(record);
@@ -401,10 +429,19 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
     
     private void writeCsvBatch(List<SearchQueryRecord> records) {
+        log.info("Writing {} records to CSV file: {}", records.size(), CSV_FILE_PATH);
         try (java.io.FileWriter writer = new java.io.FileWriter(CSV_FILE_PATH, true)) {
+            // Write header if file is empty
+            java.io.File file = new java.io.File(CSV_FILE_PATH);
+            if (file.length() == 0) {
+                writer.append("timestamp,query_type,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n");
+            }
+            
             for (SearchQueryRecord record : records) {
-                writer.append(String.format("%d,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
+                String queryType = getQueryType(record);
+                writer.append(String.format("%d,%s,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
                     record.getTimestamp(),
+                    queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
                     record.getMeasurement(MetricType.CPU).longValue(),
                     record.getMeasurement(MetricType.MEMORY).longValue(),
@@ -414,9 +451,21 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     record.getAttributes().get(Attribute.NODE_ID)
                 ));
             }
+            log.info("Successfully wrote CSV batch");
         } catch (IOException e) {
             log.error("Failed to write CSV batch: {}", e.getMessage());
         }
+    }
+    
+    private String getQueryType(SearchQueryRecord record) {
+        Object source = record.getAttributes().get(Attribute.SOURCE);
+        if (source != null) {
+            String sourceStr = source.toString();
+            if (sourceStr.contains("range")) return "RANGE";
+            if (sourceStr.contains("match")) return "MATCH";
+            if (sourceStr.contains("term")) return "TERM";
+        }
+        return "UNKNOWN";
     }
 
 }
