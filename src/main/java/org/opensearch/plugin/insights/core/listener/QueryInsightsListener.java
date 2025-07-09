@@ -20,10 +20,6 @@ import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getT
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNWindowSizeSetting;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -31,10 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
@@ -78,11 +71,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     private final QueryShapeGenerator queryShapeGenerator;
     private Set<Pattern> excludedIndicesPattern;
     
-    // CSV Export Queue System
-    private static final int BATCH_SIZE = 1000;
-    private static final String CSV_FILE_PATH = "queryMetricsOutput.csv";
-    private final BlockingQueue<SearchQueryRecord> csvExportQueue = new LinkedBlockingQueue<>();
-    private final AtomicBoolean csvHeaderWritten = new AtomicBoolean(false);
+    // CSV Export
+    private static final String CSV_FILE_PATH = "queryOutput.csv";
+    private final List<SearchQueryRecord> csvBuffer = new ArrayList<>();
+    private static final int BATCH_SIZE = 1;
 
     /**
      * Constructor for QueryInsightsListener
@@ -179,9 +171,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(SEARCH_QUERY_METRICS_ENABLED_SETTING, this::setSearchQueryMetricsEnabled);
         setSearchQueryMetricsEnabled(clusterService.getClusterSettings().get(SEARCH_QUERY_METRICS_ENABLED_SETTING));
-        
-        // Initialize CSV export processing
-        startCsvExportProcessor();
     }
 
     private void setExcludedIndices(List<String> excludedIndices) {
@@ -293,12 +282,9 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
-        log.info("CSV Export: constructSearchQueryRecord called");
         if (skipSearchRequest(searchRequestContext)) {
-            log.info("CSV Export: Skipping search request");
             return;
         }
-        log.info("CSV Export: Processing search request");
 
         SearchTask searchTask = context.getTask();
         List<TaskResourceInfo> tasksResourceUsages = searchRequestContext.getPhaseResourceUsage();
@@ -376,8 +362,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             SearchQueryRecord record = new SearchQueryRecord(request.getOrCreateAbsoluteStartMillis(), measurements, attributes);
             queryInsightsService.addRecord(record);
             
-            // Queue record for async CSV export
-            queueRecordForCsvExport(record);
+            // Export to CSV asynchronously
+            exportToCsvAsync(record);
             
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
@@ -403,100 +389,34 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
 
-    /**
-     * Queue a record for asynchronous CSV export
-     */
-    private void queueRecordForCsvExport(SearchQueryRecord record) {
-        try {
-            boolean queued = csvExportQueue.offer(record);
-            log.info("CSV Export: Queued record {} - Queue size: {}", queued, csvExportQueue.size());
-        } catch (Exception e) {
-            log.warn("Failed to queue record for CSV export: {}", e.getMessage());
+    private synchronized void exportToCsvAsync(SearchQueryRecord record) {
+        log.info("Adding record to CSV buffer");
+        csvBuffer.add(record);
+        if (csvBuffer.size() >= BATCH_SIZE) {
+            List<SearchQueryRecord> batch = new ArrayList<>(csvBuffer);
+            csvBuffer.clear();
+            log.info("Writing CSV batch of {} records", batch.size());
+            clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writeCsvBatch(batch));
         }
     }
     
-    /**
-     * Start the CSV export processor using query insights thread pool
-     */
-    private void startCsvExportProcessor() {
-        log.info("CSV Export: Starting CSV export processor");
-        // Use the cluster service's thread pool with the query insights executor
-        clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> {
-            log.info("CSV Export: CSV export processor thread started");
-            List<SearchQueryRecord> batch = new ArrayList<>();
-            
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    // Wait for records and batch them
-                    SearchQueryRecord record = csvExportQueue.take();
-                    batch.add(record);
-                    log.info("CSV Export: Processing batch with {} records", batch.size());
-                    
-                    // Drain additional records up to batch size
-                    csvExportQueue.drainTo(batch, BATCH_SIZE - 1);
-                    
-                    // Write batch to CSV
-                    writeBatchToCsv(batch);
-                    batch.clear();
-                    
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    log.error("Error in CSV export processor: {}", e.getMessage());
-                }
-            }
-        });
-    }
-    
-    /**
-     * Write a batch of records to CSV file
-     */
-    private void writeBatchToCsv(List<SearchQueryRecord> records) {
-        if (records.isEmpty()) {
-            log.info("CSV Export: Empty batch, skipping write");
-            return;
-        }
-        
-        try {
-            Path csvPath = Paths.get(CSV_FILE_PATH);
-            log.info("CSV Export: Writing {} records to {}", records.size(), csvPath.toAbsolutePath());
-            
-            // Write CSV header if this is the first write
-            if (csvHeaderWritten.compareAndSet(false, true)) {
-                Files.write(csvPath, "timestamp,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n".getBytes());
-                log.info("CSV Export: Header written to file");
-            }
-            
-            // Prepare batch data
-            StringBuilder csvData = new StringBuilder();
+    private void writeCsvBatch(List<SearchQueryRecord> records) {
+        try (java.io.FileWriter writer = new java.io.FileWriter(CSV_FILE_PATH, true)) {
             for (SearchQueryRecord record : records) {
-                csvData.append(formatRecordAsCsv(record)).append("\n");
+                writer.append(String.format("%d,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
+                    record.getTimestamp(),
+                    record.getMeasurement(MetricType.LATENCY).longValue(),
+                    record.getMeasurement(MetricType.CPU).longValue(),
+                    record.getMeasurement(MetricType.MEMORY).longValue(),
+                    record.getAttributes().get(Attribute.SEARCH_TYPE),
+                    String.join(";", (String[]) record.getAttributes().get(Attribute.INDICES)),
+                    (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
+                    record.getAttributes().get(Attribute.NODE_ID)
+                ));
             }
-            
-            // Append batch to file
-            Files.write(csvPath, csvData.toString().getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            log.info("CSV Export: Successfully wrote batch to file");
-            
         } catch (IOException e) {
             log.error("Failed to write CSV batch: {}", e.getMessage());
         }
-    }
-    
-    /**
-     * Format a SearchQueryRecord as CSV row
-     */
-    private String formatRecordAsCsv(SearchQueryRecord record) {
-        return String.format("%d,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"",
-            record.getTimestamp(),
-            record.getMeasurement(MetricType.LATENCY).longValue(),
-            record.getMeasurement(MetricType.CPU).longValue(),
-            record.getMeasurement(MetricType.MEMORY).longValue(),
-            record.getAttributes().get(Attribute.SEARCH_TYPE),
-            String.join(";", (String[]) record.getAttributes().get(Attribute.INDICES)),
-            (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
-            record.getAttributes().get(Attribute.NODE_ID)
-        );
     }
 
 }
