@@ -406,7 +406,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
 
-    private boolean isRangeQuery(SearchRequest request) {
+    /*private boolean isRangeQuery(SearchRequest request) {
         if (request.source() == null) {
             log.info("No query source found");
             return false;
@@ -417,6 +417,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         log.info("Is range query: {}", isRange);
         return isRange;
     }
+    */
     
     private synchronized void exportToCsvAsync(SearchQueryRecord record) {
         log.info("Adding record to CSV buffer");
@@ -478,6 +479,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
             String sourceStr = source.toString();
+            // Range queries Only for now
             if (sourceStr.contains("range")) return "RANGE";
             if (sourceStr.contains("match")) return "MATCH";
             if (sourceStr.contains("term")) return "TERM";
