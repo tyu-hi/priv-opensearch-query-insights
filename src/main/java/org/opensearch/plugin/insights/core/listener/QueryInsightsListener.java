@@ -405,19 +405,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             }
         }
     }
-
-    /*private boolean isRangeQuery(SearchRequest request) {
-        if (request.source() == null) {
-            log.info("No query source found");
-            return false;
-        }
-        String queryString = request.source().toString();
-        log.info("Query source: {}", queryString);
-        boolean isRange = queryString.contains("range") || queryString.contains("Range");
-        log.info("Is range query: {}", isRange);
-        return isRange;
-    }
-    */
     
     private synchronized void exportToCsvAsync(SearchQueryRecord record) {
         log.info("Adding record to CSV buffer");
