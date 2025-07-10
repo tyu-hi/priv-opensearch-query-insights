@@ -71,10 +71,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     private final QueryShapeGenerator queryShapeGenerator;
     private Set<Pattern> excludedIndicesPattern;
     
-    // CSV Export
-    private static final String CSV_FILE_PATH = "queryOutput.csv";
-    private static final String QUERY_JSON_FILE_PATH = "queryDetails.json";
-    private final List<SearchQueryRecord> csvBuffer = new ArrayList<>();
+    
+    // Added: For CSV Export
+    private static final String ML_TRAINING_FILE_PATH = "queryMetrics.json";
+    private final List<SearchQueryRecord> mlBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
 
     /**
@@ -378,9 +378,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             SearchQueryRecord record = new SearchQueryRecord(request.getOrCreateAbsoluteStartMillis(), measurements, attributes);
             queryInsightsService.addRecord(record);
             
-            // Export to CSV asynchronously
-            log.info("Exporting query for indices: {}", String.join(",", request.indices()));
-            exportToCsvAsync(record);
+            // Added: Export to CSV
+            exporttoCSV(record);
             
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
@@ -406,30 +405,26 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
     
-    private synchronized void exportToCsvAsync(SearchQueryRecord record) {
-        log.info("Adding record to CSV buffer");
-        csvBuffer.add(record);
-        if (csvBuffer.size() >= BATCH_SIZE) {
-            List<SearchQueryRecord> batch = new ArrayList<>(csvBuffer);
-            csvBuffer.clear();
-            log.info("Writing CSV batch of {} records", batch.size());
-            clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writeCsvBatch(batch));
+    // Added
+    private synchronized void exporttoCSV(SearchQueryRecord record) {
+        mlBuffer.add(record);
+        if (mlBuffer.size() >= BATCH_SIZE) {
+            List<SearchQueryRecord> batch = new ArrayList<>(mlBuffer);
+            mlBuffer.clear();
+            clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writetoCSVBatch(batch));
         }
     }
     
-    private void writeCsvBatch(List<SearchQueryRecord> records) {
-        log.info("Writing {} records to CSV and JSON files", records.size());
-        
-        // Write CSV metrics
-        try (java.io.FileWriter csvWriter = new java.io.FileWriter(CSV_FILE_PATH, true)) {
-            java.io.File csvFile = new java.io.File(CSV_FILE_PATH);
-            if (csvFile.length() == 0) {
-                csvWriter.append("timestamp,query_type,latency_ms,cpu_nanos,memory_bytes,search_type,indices,total_shards,node_id\n");
-            }
-            
+    // Added
+    private void writetoCSVBatch(List<SearchQueryRecord> records) {
+        try (java.io.FileWriter writer = new java.io.FileWriter(ML_TRAINING_FILE_PATH, true)) {
             for (SearchQueryRecord record : records) {
+                Object source = record.getAttributes().get(Attribute.SOURCE);
+                String queryJson = source != null ? source.toString() : "{}";
                 String queryType = getQueryType(record);
-                csvWriter.append(String.format("%d,%s,%d,%d,%d,\"%s\",\"%s\",%d,\"%s\"\n",
+                
+                writer.append(String.format(
+                    "{\"timestamp\":%d,\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"node_id\":\"%s\",\"query\":%s}\n",
                     record.getTimestamp(),
                     queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
@@ -438,38 +433,35 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     record.getAttributes().get(Attribute.SEARCH_TYPE),
                     String.join(";", (String[]) record.getAttributes().get(Attribute.INDICES)),
                     (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
-                    record.getAttributes().get(Attribute.NODE_ID)
-                ));
-            }
-        } catch (IOException e) {
-            log.error("Failed to write CSV: {}", e.getMessage());
-        }
-        
-        // Write JSON queries
-        try (java.io.FileWriter jsonWriter = new java.io.FileWriter(QUERY_JSON_FILE_PATH, true)) {
-            for (SearchQueryRecord record : records) {
-                Object source = record.getAttributes().get(Attribute.SOURCE);
-                String queryJson = source != null ? source.toString() : "{}";
-                jsonWriter.append(String.format("{\"timestamp\":%d,\"query\":%s}\n",
-                    record.getTimestamp(),
+                    record.getAttributes().get(Attribute.NODE_ID),
                     queryJson
                 ));
             }
         } catch (IOException e) {
-            log.error("Failed to write JSON: {}", e.getMessage());
+            log.error("Failed to write to CSV file: {}", e.getMessage());
         }
-        
-        log.info("Successfully wrote CSV and JSON files");
     }
-    
+
+
+    // Added
     private String getQueryType(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
-            String sourceStr = source.toString();
-            // Range queries Only for now
+            String sourceStr = source.toString().toLowerCase();
             if (sourceStr.contains("range")) return "RANGE";
+            if (sourceStr.contains("match_all")) return "MATCH_ALL";
+            if (sourceStr.contains("match_phrase")) return "MATCH_PHRASE";
             if (sourceStr.contains("match")) return "MATCH";
+            if (sourceStr.contains("multi_match")) return "MULTI_MATCH";
             if (sourceStr.contains("term")) return "TERM";
+            if (sourceStr.contains("terms")) return "TERMS";
+            if (sourceStr.contains("bool")) return "BOOL";
+            if (sourceStr.contains("wildcard")) return "WILDCARD";
+            if (sourceStr.contains("prefix")) return "PREFIX";
+            if (sourceStr.contains("fuzzy")) return "FUZZY";
+            if (sourceStr.contains("regexp")) return "REGEXP";
+            if (sourceStr.contains("exists")) return "EXISTS";
+            if (sourceStr.contains("ids")) return "IDS";
         }
         return "UNKNOWN";
     }
