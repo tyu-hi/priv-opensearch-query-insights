@@ -19,8 +19,13 @@ import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getT
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNSizeSetting;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNWindowSizeSetting;
 
+// Added
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -72,9 +77,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     private Set<Pattern> excludedIndicesPattern;
     
     
-    // Added: For CSV Export
-    private static final String ML_TRAINING_FILE_PATH = "queryMetrics.json";
-    private final List<SearchQueryRecord> mlBuffer = new ArrayList<>();
+    // Added:
+    // Query Export
+    private final String queryExportFilePath;
+    private final List<SearchQueryRecord> queryBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
 
     /**
@@ -107,6 +113,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         this.queryInsightsService = queryInsightsService;
         this.queryShapeGenerator = new QueryShapeGenerator(clusterService);
         queryInsightsService.setQueryShapeGenerator(queryShapeGenerator);
+        
+        // Generate unique filename with readable timestamp
+        this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" + 
+            DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
 
         // Setting endpoints set up for top n queries, including enabling top n queries, window size, and top n size
         // Expected metricTypes are Latency, CPU, and Memory.
@@ -378,8 +388,9 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             SearchQueryRecord record = new SearchQueryRecord(request.getOrCreateAbsoluteStartMillis(), measurements, attributes);
             queryInsightsService.addRecord(record);
             
-            // Added: Export to CSV
-            exporttoCSV(record);
+            // Added
+            // Export query data
+            exportQueryData(record);
             
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
@@ -405,27 +416,29 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
     
-    // Added
-    private synchronized void exporttoCSV(SearchQueryRecord record) {
-        mlBuffer.add(record);
-        if (mlBuffer.size() >= BATCH_SIZE) {
-            List<SearchQueryRecord> batch = new ArrayList<>(mlBuffer);
-            mlBuffer.clear();
-            clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writetoCSVBatch(batch));
+
+    // Added:
+    private synchronized void exportQueryData(SearchQueryRecord record) {
+        queryBuffer.add(record);
+        if (queryBuffer.size() >= BATCH_SIZE) {
+            List<SearchQueryRecord> batch = new ArrayList<>(queryBuffer);
+            queryBuffer.clear();
+            clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writeQueryBatch(batch));
         }
     }
     
     // Added
-    private void writetoCSVBatch(List<SearchQueryRecord> records) {
-        try (java.io.FileWriter writer = new java.io.FileWriter(ML_TRAINING_FILE_PATH, true)) {
+    private void writeQueryBatch(List<SearchQueryRecord> records) {
+        try (java.io.FileWriter writer = new java.io.FileWriter(queryExportFilePath, true)) {
             for (SearchQueryRecord record : records) {
                 Object source = record.getAttributes().get(Attribute.SOURCE);
                 String queryJson = source != null ? source.toString() : "{}";
                 String queryType = getQueryType(record);
                 
+                String formattedDate = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(record.getTimestamp()));
                 writer.append(String.format(
-                    "{\"timestamp\":%d,\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"node_id\":\"%s\",\"query\":%s}\n",
-                    record.getTimestamp(),
+                    "{\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"node_id\":\"%s\",\"requested_size\":%d,\"query\":%s}\n",
+                    formattedDate,
                     queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
                     record.getMeasurement(MetricType.CPU).longValue(),
@@ -434,6 +447,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     String.join(";", (String[]) record.getAttributes().get(Attribute.INDICES)),
                     (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
                     record.getAttributes().get(Attribute.NODE_ID),
+                    getRequestedSize(record),
                     queryJson
                 ));
             }
@@ -443,7 +457,26 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
 
-    // Added
+    private int getRequestedSize(SearchQueryRecord record) {
+        Object source = record.getAttributes().get(Attribute.SOURCE);
+        if (source != null) {
+            String sourceStr = source.toString();
+            if (sourceStr.contains("\"size\":")) {
+                try {
+                    int sizeIndex = sourceStr.indexOf("\"size\":");
+                    String sizeSubstring = sourceStr.substring(sizeIndex + 7);
+                    int commaIndex = sizeSubstring.indexOf(",");
+                    int braceIndex = sizeSubstring.indexOf("}");
+                    int endIndex = (commaIndex != -1 && commaIndex < braceIndex) ? commaIndex : braceIndex;
+                    return Integer.parseInt(sizeSubstring.substring(0, endIndex).trim());
+                } catch (Exception e) {
+                    return -1;
+                }
+            }
+        }
+        return 10; // Default OpenSearch size
+    }
+    
     private String getQueryType(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
