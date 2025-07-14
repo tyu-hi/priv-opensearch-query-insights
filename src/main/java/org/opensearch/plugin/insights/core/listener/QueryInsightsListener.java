@@ -37,13 +37,21 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+// Added
+import org.opensearch.action.admin.indices.stats.IndexStats;
+import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
+import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
+import org.opensearch.transport.client.Client;
 import org.opensearch.action.search.SearchPhaseContext;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchRequestContext;
 import org.opensearch.action.search.SearchRequestOperationsListener;
 import org.opensearch.action.search.SearchTask;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceInfo;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetric;
@@ -71,17 +79,25 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     private final QueryInsightsService queryInsightsService;
     private final ClusterService clusterService;
+    private final Client client;
     private boolean groupingFieldNameEnabled;
     private boolean groupingFieldTypeEnabled;
     private final QueryShapeGenerator queryShapeGenerator;
     private Set<Pattern> excludedIndicesPattern;
-    
-    
+
+
     // Added:
-    // Query Export
+    // For Query Export
     private final String queryExportFilePath;
+
+    // For writing to the same file to aggregate the workload data:
+    // private final String queryExportFilePath = "fullQueryMetrics.json";
+    
     private final List<SearchQueryRecord> queryBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
+    
+    // Cache for document counts by index key
+    private final Map<String, Long> docCountCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Constructor for QueryInsightsListener
@@ -91,7 +107,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
      */
     @Inject
     public QueryInsightsListener(final ClusterService clusterService, final QueryInsightsService queryInsightsService) {
-        this(clusterService, queryInsightsService, false);
+        this(clusterService, queryInsightsService, null, false);
         groupingFieldNameEnabled = false;
         groupingFieldTypeEnabled = false;
     }
@@ -106,16 +122,18 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     public QueryInsightsListener(
         final ClusterService clusterService,
         final QueryInsightsService queryInsightsService,
+        final Client client,
         boolean initiallyEnabled
     ) {
         super(initiallyEnabled);
         this.clusterService = clusterService;
         this.queryInsightsService = queryInsightsService;
+        this.client = client;
         this.queryShapeGenerator = new QueryShapeGenerator(clusterService);
         queryInsightsService.setQueryShapeGenerator(queryShapeGenerator);
-        
+
         // Generate unique filename with readable timestamp
-        this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" + 
+        this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" +
             DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
 
         // Setting endpoints set up for top n queries, including enabling top n queries, window size, and top n size
@@ -288,7 +306,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 return indices.stream().map(Index::getName).anyMatch(this::matchedExcludedIndices);
             })
             .orElse(false);
-        
+
         if (shouldSkip) {
             log.info("Skipping excluded indices");
         }
@@ -307,7 +325,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             .map(arr -> String.join(",", arr))
             .orElse("unknown");
         log.info("Processing search request for indices: {}", indices);
-        
+
         if (skipSearchRequest(searchRequestContext)) {
             return;
         }
@@ -387,11 +405,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             // Construct SearchQueryRecord from attributes and measurements
             SearchQueryRecord record = new SearchQueryRecord(request.getOrCreateAbsoluteStartMillis(), measurements, attributes);
             queryInsightsService.addRecord(record);
-            
+
             // Added
             // Export query data
             exportQueryData(record);
-            
+
         } catch (Exception e) {
             OperationalMetricsCounter.getInstance().incrementCounter(OperationalMetric.DATA_INGEST_EXCEPTIONS);
             log.error(String.format(Locale.ROOT, "fail to ingest query insight data, error: %s", e));
@@ -415,7 +433,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             }
         }
     }
-    
+
 
     // Added:
     private synchronized void exportQueryData(SearchQueryRecord record) {
@@ -426,7 +444,27 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             clusterService.getClusterApplierService().threadPool().executor(QUERY_INSIGHTS_EXECUTOR).execute(() -> writeQueryBatch(batch));
         }
     }
-    
+
+    // Return shard count for indices in the query
+    private int getActiveShardCount(SearchQueryRecord record) {
+        ClusterState clusterState = clusterService.state();
+        int totalShards = 0;
+        String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
+
+        for (String indexName : indices) {
+            try {
+                totalShards += clusterState.routingTable()
+                    .index(indexName)
+                    .primaryShardsActive();
+            } catch (Exception e) {
+                // Index might not exist, skip
+            }
+        }
+        return totalShards;
+    }
+
+
+
     // Added
     private void writeQueryBatch(List<SearchQueryRecord> records) {
         try (java.io.FileWriter writer = new java.io.FileWriter(queryExportFilePath, true)) {
@@ -434,18 +472,23 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 Object source = record.getAttributes().get(Attribute.SOURCE);
                 String queryJson = source != null ? source.toString() : "{}";
                 String queryType = getQueryType(record);
-                
+
                 String formattedDate = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(record.getTimestamp()));
+                String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
+                String indicesStr = (indices != null && indices.length > 0) ? String.join(";", indices) : "_all";
+                
                 writer.append(String.format(
-                    "{\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"node_id\":\"%s\",\"requested_size\":%d,\"query\":%s}\n",
+                    "{\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d,\"query\":%s}\n",
                     formattedDate,
                     queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
                     record.getMeasurement(MetricType.CPU).longValue(),
                     record.getMeasurement(MetricType.MEMORY).longValue(),
+                    getDocumentCount(record),
                     record.getAttributes().get(Attribute.SEARCH_TYPE),
-                    String.join(";", (String[]) record.getAttributes().get(Attribute.INDICES)),
+                    indicesStr,
                     (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
+                    getActiveShardCount(record),
                     record.getAttributes().get(Attribute.NODE_ID),
                     getRequestedSize(record),
                     queryJson
@@ -457,6 +500,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
 
+    // Attempt at returning document size
     private int getRequestedSize(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
@@ -474,9 +518,42 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 }
             }
         }
-        return 10; // Default OpenSearch size
+        return 0; // Default size
     }
-    
+
+    // Return exact document count for indices in the query
+    private long getDocumentCount(SearchQueryRecord record) {
+        if (client == null) {
+            return 0;
+        }
+        
+        String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
+        String cacheKey = (indices != null && indices.length > 0) ? String.join(",", indices) : "_all";
+        
+        // Check cache first
+        if (docCountCache.containsKey(cacheKey)) {
+            return docCountCache.get(cacheKey);
+        }
+        
+        // Not in cache, make API call
+        try {
+            IndicesStatsRequest request = new IndicesStatsRequest();
+            request.indices(indices);
+            request.docs(true);
+
+            IndicesStatsResponse response = client.admin().indices().stats(request).actionGet();
+            long count = response.getTotal().getDocs() != null ? response.getTotal().getDocs().getCount() : 0;
+            
+            // Cache the result
+            docCountCache.put(cacheKey, count);
+            return count;
+        } catch (Exception e) {
+            // Cache 0 to avoid repeated failures
+            docCountCache.put(cacheKey, 0L);
+            return 0;
+        }
+    }
+
     private String getQueryType(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
