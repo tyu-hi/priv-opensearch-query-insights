@@ -41,6 +41,9 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.action.admin.indices.stats.IndexStats;
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
+import org.opensearch.cluster.routing.IndexRoutingTable;
+import org.opensearch.cluster.routing.IndexShardRoutingTable;
+import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.transport.client.Client;
 import org.opensearch.action.search.SearchPhaseContext;
 import org.opensearch.action.search.SearchRequest;
@@ -88,14 +91,14 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     // Added:
     // For Query Export
-    private final String queryExportFilePath;
+    //private final String queryExportFilePath;
 
     // For writing to the same file to aggregate the workload data:
-    // private final String queryExportFilePath = "fullQueryMetrics.json";
-    
+    private final String queryExportFilePath = "NEWFullQueryMetrics.json";
+
     private final List<SearchQueryRecord> queryBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
-    
+
     // Cache for document counts by index key
     private final Map<String, Long> docCountCache = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -133,8 +136,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         queryInsightsService.setQueryShapeGenerator(queryShapeGenerator);
 
         // Generate unique filename with readable timestamp
-        this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" +
-            DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
+        //this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" +
+        //    DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
 
         // Setting endpoints set up for top n queries, including enabling top n queries, window size, and top n size
         // Expected metricTypes are Latency, CPU, and Memory.
@@ -448,19 +451,84 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     // Return shard count for indices in the query
     private int getActiveShardCount(SearchQueryRecord record) {
         ClusterState clusterState = clusterService.state();
-        int totalShards = 0;
+        int activeShards = 0;
         String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
 
+        // Handle special case for "_all" or empty indices
+        boolean isAllIndices = indices == null || indices.length == 0 || 
+            (indices.length == 1 && (indices[0] == null || indices[0].equals("_all")));
+            
+        if (isAllIndices) {
+            // Try to detect the actual index from the query
+            Object source = record.getAttributes().get(Attribute.SOURCE);
+            if (source != null) {
+                String sourceStr = source.toString();
+                String detectedIndex = null;
+                
+                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class")) {
+                    detectedIndex = "geonames";
+                } else if (sourceStr.contains("nested") || sourceStr.contains("join_field")) {
+                    detectedIndex = "nested";
+                } else if (sourceStr.contains("event_type") || sourceStr.contains("message")) {
+                    detectedIndex = "eventdata";
+                } else if (sourceStr.contains("sonested") || sourceStr.contains("song")) {
+                    detectedIndex = "sonested";
+                }
+                
+                if (detectedIndex != null) {
+                    // Use the detected index
+                    try {
+                        IndexRoutingTable indexRoutingTable = clusterState.routingTable().index(detectedIndex);
+                        if (indexRoutingTable != null) {
+                            for (IndexShardRoutingTable shardRoutingTable : indexRoutingTable) {
+                                for (ShardRouting shardRouting : shardRoutingTable) {
+                                    if (shardRouting.active()) {
+                                        activeShards++;
+                                    }
+                                }
+                            }
+                        }
+                        return activeShards;
+                    } catch (Exception e) {
+                        // Fall back to counting all shards
+                    }
+                }
+            }
+            
+            // If we couldn't detect a specific index, count all active shards
+            for (IndexRoutingTable indexRoutingTable : clusterState.routingTable()) {
+                if (indexRoutingTable != null) {
+                    for (IndexShardRoutingTable shardRoutingTable : indexRoutingTable) {
+                        for (ShardRouting shardRouting : shardRoutingTable) {
+                            if (shardRouting.active()) {
+                                activeShards++;
+                            }
+                        }
+                    }
+                }
+            }
+            return activeShards;
+        }
+
+        // Handle specific indices
         for (String indexName : indices) {
             try {
-                totalShards += clusterState.routingTable()
-                    .index(indexName)
-                    .primaryShardsActive();
+                IndexRoutingTable indexRoutingTable = clusterState.routingTable().index(indexName);
+                if (indexRoutingTable != null) {
+                    for (IndexShardRoutingTable shardRoutingTable : indexRoutingTable) {
+                        for (ShardRouting shardRouting : shardRoutingTable) {
+                            if (shardRouting.active()) {
+                                activeShards++;
+                            }
+                        }
+                    }
+                }
             } catch (Exception e) {
                 // Index might not exist, skip
+                log.debug("Failed to get active shard count for index {}: {}", indexName, e.getMessage());
             }
         }
-        return totalShards;
+        return activeShards;
     }
 
 
@@ -475,8 +543,67 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
                 String formattedDate = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(record.getTimestamp()));
                 String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
-                String indicesStr = (indices != null && indices.length > 0) ? String.join(";", indices) : "_all";
                 
+                // Try to determine actual indices from the query if possible
+                String indicesStr;
+                if (indices == null || indices.length == 0 || (indices.length == 1 && "_all".equals(indices[0]))) {
+                    // First check if we can find the index in the query source
+                    if (source != null) {
+                        String sourceStr = source.toString();
+                        
+                        // Check for explicit index in the query
+                        int indexPos = sourceStr.indexOf("\"index\":");
+                        if (indexPos > 0) {
+                            int startQuote = sourceStr.indexOf('"', indexPos + 8);
+                            if (startQuote > 0) {
+                                int endQuote = sourceStr.indexOf('"', startQuote + 1);
+                                if (endQuote > 0) {
+                                    indicesStr = sourceStr.substring(startQuote + 1, endQuote);
+                                } else {
+                                    indicesStr = "_all";
+                                }
+                            } else {
+                                indicesStr = "_all";
+                            }
+                        } else {
+                            // Check for field patterns that might indicate the index
+                            // For geonames benchmark
+                            if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") || 
+                                sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
+                                indicesStr = "geonames";
+                            } 
+                            // For nested benchmark
+                            else if (sourceStr.contains("nested") || sourceStr.contains("parent") || 
+                                     sourceStr.contains("child") || sourceStr.contains("join_field")) {
+                                indicesStr = "nested";
+                            }
+                            // For eventdata benchmark
+                            else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") || 
+                                     sourceStr.contains("message") || sourceStr.contains("host")) {
+                                indicesStr = "eventdata";
+                            }
+                            // For sonested benchmark
+                            else if (sourceStr.contains("sonested") || sourceStr.contains("song") || 
+                                     sourceStr.contains("artist") || sourceStr.contains("album")) {
+                                indicesStr = "sonested";
+                            }
+                            else {
+                                // Try to get index from task header if available
+                                String taskHeader = (String) record.getAttributes().get(Attribute.LABELS);
+                                if (taskHeader != null && taskHeader.toString().contains("geonames")) {
+                                    indicesStr = "geonames";
+                                } else {
+                                    indicesStr = "_all";
+                                }
+                            }
+                        }
+                    } else {
+                        indicesStr = "_all";
+                    }
+                } else {
+                    indicesStr = String.join(";", indices);
+                }
+
                 writer.append(String.format(
                     "{\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d,\"query\":%s}\n",
                     formattedDate,
@@ -526,28 +653,74 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         if (client == null) {
             return 0;
         }
-        
+
         String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
-        String cacheKey = (indices != null && indices.length > 0) ? String.join(",", indices) : "_all";
         
+        // Handle special case for "_all" or empty indices
+        boolean isAllIndices = indices == null || indices.length == 0 || 
+            (indices.length == 1 && (indices[0] == null || "_all".equals(indices[0])));
+        
+        // Try to detect the actual index if it's _all
+        String[] actualIndices = indices;
+        if (isAllIndices) {
+            // Try to detect the index from the query
+            Object source = record.getAttributes().get(Attribute.SOURCE);
+            if (source != null) {
+                String sourceStr = source.toString();
+                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class")) {
+                    actualIndices = new String[] {"geonames"};
+                    isAllIndices = false;
+                } else if (sourceStr.contains("nested") || sourceStr.contains("join_field")) {
+                    actualIndices = new String[] {"nested"};
+                    isAllIndices = false;
+                } else if (sourceStr.contains("event_type") || sourceStr.contains("message")) {
+                    actualIndices = new String[] {"eventdata"};
+                    isAllIndices = false;
+                } else if (sourceStr.contains("sonested") || sourceStr.contains("song")) {
+                    actualIndices = new String[] {"sonested"};
+                    isAllIndices = false;
+                }
+            }
+        }
+        
+        String cacheKey = isAllIndices ? "_all" : String.join(",", actualIndices);
+
         // Check cache first
         if (docCountCache.containsKey(cacheKey)) {
             return docCountCache.get(cacheKey);
         }
-        
+
         // Not in cache, make API call
         try {
             IndicesStatsRequest request = new IndicesStatsRequest();
-            request.indices(indices);
+            if (!isAllIndices) {
+                request.indices(actualIndices);
+            }
             request.docs(true);
 
             IndicesStatsResponse response = client.admin().indices().stats(request).actionGet();
-            long count = response.getTotal().getDocs() != null ? response.getTotal().getDocs().getCount() : 0;
+            long totalCount = 0;
+            
+            if (isAllIndices) {
+                // For _all, use the total count across all indices
+                totalCount = response.getTotal().getDocs() != null ? 
+                    response.getTotal().getDocs().getCount() : 0;
+            } else {
+                // Sum up document counts for each specific index in the query
+                for (String indexName : actualIndices) {
+                    IndexStats indexStats = response.getIndex(indexName);
+                    if (indexStats != null && indexStats.getPrimaries().getDocs() != null) {
+                        totalCount += indexStats.getPrimaries().getDocs().getCount();
+                    }
+                }
+            }
             
             // Cache the result
-            docCountCache.put(cacheKey, count);
-            return count;
+            docCountCache.put(cacheKey, totalCount);
+            return totalCount;
         } catch (Exception e) {
+            log.debug("Failed to get document count for indices {}: {}", 
+                isAllIndices ? "_all" : String.join(",", indices), e.getMessage());
             // Cache 0 to avoid repeated failures
             docCountCache.put(cacheKey, 0L);
             return 0;
