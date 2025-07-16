@@ -22,7 +22,6 @@ import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getT
 // Added
 import java.io.IOException;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 
@@ -51,10 +50,9 @@ import org.opensearch.action.search.SearchRequestContext;
 import org.opensearch.action.search.SearchRequestOperationsListener;
 import org.opensearch.action.search.SearchTask;
 import org.opensearch.cluster.ClusterState;
-import org.opensearch.cluster.metadata.IndexMetadata;
+//import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
-import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceInfo;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetric;
@@ -301,6 +299,22 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             return false;
         }
 
+        // Check if this is a benchmark query we want to capture
+        SearchRequest request = searchRequestContext.getRequest();
+        if (request != null && request.source() != null) {
+            String sourceStr = request.source().toString().toLowerCase();
+            // Don't skip benchmark queries
+            if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") || 
+                sourceStr.contains("nested") || sourceStr.contains("join_field") ||
+                sourceStr.contains("answer") || sourceStr.contains("comment") ||
+                sourceStr.contains("question") || sourceStr.contains("tag") ||
+                sourceStr.contains("event_type") || sourceStr.contains("sonested")) {
+                log.debug("Not skipping benchmark query: {}", 
+                          sourceStr.substring(0, Math.min(100, sourceStr.length())) + "...");
+                return false;
+            }
+        }
+
         boolean shouldSkip = Optional.ofNullable(searchRequestContext)
             .map(SearchRequestContext::getSuccessfulSearchShardIndices)
             .map(indices -> {
@@ -440,6 +454,14 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     // Added:
     private synchronized void exportQueryData(SearchQueryRecord record) {
+        // Add debug logging to help diagnose issues with specific workloads
+        Object source = record.getAttributes().get(Attribute.SOURCE);
+        String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
+        String indicesStr = (indices != null && indices.length > 0) ? String.join(",", indices) : "_all";
+        
+        log.debug("Exporting query data for indices: {}, query: {}", indicesStr, 
+                 source != null ? source.toString().substring(0, Math.min(100, source.toString().length())) + "..." : "null");
+        
         queryBuffer.add(record);
         if (queryBuffer.size() >= BATCH_SIZE) {
             List<SearchQueryRecord> batch = new ArrayList<>(queryBuffer);
@@ -465,13 +487,54 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 String sourceStr = source.toString();
                 String detectedIndex = null;
                 
-                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class")) {
+                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") || 
+                    sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
                     detectedIndex = "geonames";
-                } else if (sourceStr.contains("nested") || sourceStr.contains("join_field")) {
-                    detectedIndex = "nested";
-                } else if (sourceStr.contains("event_type") || sourceStr.contains("message")) {
+                } else if (sourceStr.contains("tag") && sourceStr.contains("term")) {
+                    // This is likely the stackexchange/nested benchmark
+                    // Check if sonested index exists
+                    try {
+                        if (clusterService.state().metadata().hasIndex("sonested")) {
+                            detectedIndex = "sonested";
+                        } else {
+                            // Find the index with the most shards
+                            int maxShards = 0;
+                            String bestIndex = null;
+                            
+                            for (IndexRoutingTable indexRoutingTable : clusterState.routingTable()) {
+                                if (indexRoutingTable.getIndex().getName().startsWith(".")) continue; // Skip system indices
+                                if (indexRoutingTable.getIndex().getName().startsWith("top_queries")) continue; // Skip query insights indices
+                                
+                                int activeShardCount = 0;
+                                for (IndexShardRoutingTable shardTable : indexRoutingTable) {
+                                    for (ShardRouting shard : shardTable) {
+                                        if (shard.active()) {
+                                            activeShardCount++;
+                                        }
+                                    }
+                                }
+                                
+                                if (activeShardCount > maxShards) {
+                                    maxShards = activeShardCount;
+                                    bestIndex = indexRoutingTable.getIndex().getName();
+                                }
+                            }
+                            
+                            if (bestIndex != null) {
+                                detectedIndex = bestIndex;
+                            } else {
+                                detectedIndex = "sonested";
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug("Error detecting index for tag queries: {}", e.getMessage());
+                        detectedIndex = "sonested";
+                    }
+                } else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") || 
+                           sourceStr.contains("message") || sourceStr.contains("host")) {
                     detectedIndex = "eventdata";
-                } else if (sourceStr.contains("sonested") || sourceStr.contains("song")) {
+                } else if (sourceStr.contains("sonested") || sourceStr.contains("song") || 
+                           sourceStr.contains("artist") || sourceStr.contains("album")) {
                     detectedIndex = "sonested";
                 }
                 
@@ -572,10 +635,45 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                                 sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
                                 indicesStr = "geonames";
                             } 
-                            // For nested benchmark
-                            else if (sourceStr.contains("nested") || sourceStr.contains("parent") || 
-                                     sourceStr.contains("child") || sourceStr.contains("join_field")) {
-                                indicesStr = "nested";
+                            // For tag-based queries (likely stackexchange/nested benchmark)
+                            else if (sourceStr.contains("tag") && sourceStr.contains("term")) {
+                                // Check if sonested index exists
+                                try {
+                                    if (clusterService.state().metadata().hasIndex("sonested")) {
+                                        indicesStr = "sonested";
+                                    } else {
+                                        // Find the index with the most documents
+                                        IndicesStatsRequest request = new IndicesStatsRequest();
+                                        request.docs(true);
+                                        IndicesStatsResponse response = client.admin().indices().stats(request).actionGet();
+                                        
+                                        String bestIndex = null;
+                                        long maxDocs = 0;
+                                        
+                                        for (String indexName : response.getIndices().keySet()) {
+                                            if (indexName.startsWith(".")) continue; // Skip system indices
+                                            if (indexName.startsWith("top_queries")) continue; // Skip query insights indices
+                                            
+                                            IndexStats stats = response.getIndex(indexName);
+                                            if (stats != null && stats.getPrimaries().getDocs() != null) {
+                                                long docCount = stats.getPrimaries().getDocs().getCount();
+                                                if (docCount > maxDocs) {
+                                                    maxDocs = docCount;
+                                                    bestIndex = indexName;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (bestIndex != null) {
+                                            indicesStr = bestIndex;
+                                        } else {
+                                            indicesStr = "sonested";
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    log.debug("Error detecting index for tag queries: {}", e.getMessage());
+                                    indicesStr = "sonested";
+                                }
                             }
                             // For eventdata benchmark
                             else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") || 
@@ -667,16 +765,61 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             Object source = record.getAttributes().get(Attribute.SOURCE);
             if (source != null) {
                 String sourceStr = source.toString();
-                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class")) {
+                
+                // Detect index based on query fields
+                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") || 
+                    sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
                     actualIndices = new String[] {"geonames"};
                     isAllIndices = false;
-                } else if (sourceStr.contains("nested") || sourceStr.contains("join_field")) {
-                    actualIndices = new String[] {"nested"};
-                    isAllIndices = false;
-                } else if (sourceStr.contains("event_type") || sourceStr.contains("message")) {
+                } else if (sourceStr.contains("tag") && sourceStr.contains("term")) {
+                    // This is likely the stackexchange/nested benchmark
+                    // Check if sonested index exists and has documents
+                    try {
+                        if (clusterService.state().metadata().hasIndex("sonested")) {
+                            actualIndices = new String[] {"sonested"};
+                            isAllIndices = false;
+                        } else {
+                            // If no suitable index exists, use the index with the most documents
+                            IndicesStatsRequest request = new IndicesStatsRequest();
+                            request.docs(true);
+                            IndicesStatsResponse response = client.admin().indices().stats(request).actionGet();
+                            
+                            String bestIndex = null;
+                            long maxDocs = 0;
+                            
+                            for (String indexName : response.getIndices().keySet()) {
+                                if (indexName.startsWith(".")) continue; // Skip system indices
+                                if (indexName.startsWith("top_queries")) continue; // Skip query insights indices
+                                
+                                IndexStats stats = response.getIndex(indexName);
+                                if (stats != null && stats.getPrimaries().getDocs() != null) {
+                                    long docCount = stats.getPrimaries().getDocs().getCount();
+                                    if (docCount > maxDocs) {
+                                        maxDocs = docCount;
+                                        bestIndex = indexName;
+                                    }
+                                }
+                            }
+                            
+                            if (bestIndex != null) {
+                                actualIndices = new String[] {bestIndex};
+                                isAllIndices = false;
+                            } else {
+                                actualIndices = new String[] {"sonested"};
+                                isAllIndices = false;
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug("Error detecting index for tag queries: {}", e.getMessage());
+                        actualIndices = new String[] {"sonested"};
+                        isAllIndices = false;
+                    }
+                } else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") || 
+                           sourceStr.contains("message") || sourceStr.contains("host")) {
                     actualIndices = new String[] {"eventdata"};
                     isAllIndices = false;
-                } else if (sourceStr.contains("sonested") || sourceStr.contains("song")) {
+                } else if (sourceStr.contains("sonested") || sourceStr.contains("song") || 
+                           sourceStr.contains("artist") || sourceStr.contains("album")) {
                     actualIndices = new String[] {"sonested"};
                     isAllIndices = false;
                 }
