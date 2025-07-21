@@ -57,6 +57,8 @@ import org.opensearch.core.index.Index;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceInfo;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetric;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetricsCounter;
+import org.opensearch.plugin.insights.core.metrics.SystemMetricsCollector;
+import org.opensearch.plugin.insights.core.analysis.QueryStructureAnalyzer;
 import org.opensearch.plugin.insights.core.service.QueryInsightsService;
 import org.opensearch.plugin.insights.core.service.categorizer.QueryShapeGenerator;
 import org.opensearch.plugin.insights.rules.model.Attribute;
@@ -92,7 +94,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     //private final String queryExportFilePath;
 
     // For writing to the same file to aggregate the workload data:
-    private final String queryExportFilePath = "NEWFullQueryMetrics.json";
+    private final String queryExportFilePath = "SystemAndQueryMetrics.json";
 
     private final List<SearchQueryRecord> queryBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
@@ -389,6 +391,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             attributes.put(Attribute.GROUP_BY, QueryInsightsSettings.DEFAULT_GROUPING_TYPE);
             attributes.put(Attribute.NODE_ID, clusterService.localNode().getId());
             attributes.put(Attribute.TOP_N_QUERY, new HashMap<>(DEFAULT_TOP_N_QUERY_MAP));
+            
+            // Extract query structure features for ML model training
+            Map<String, Object> queryFeatures = QueryStructureAnalyzer.extractQueryFeatures(request);
+            attributes.put(Attribute.QUERY_FEATURES, queryFeatures);
 
             if (queryInsightsService.isGroupingEnabled() || log.isTraceEnabled()) {
                 // Generate the query shape only if grouping is enabled or trace logging is enabled
@@ -702,8 +708,78 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     indicesStr = String.join(";", indices);
                 }
 
-                writer.append(String.format(
-                    "{\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d,\"query\":%s}\n",
+                // Get query features
+                Map<String, Object> queryFeatures = (Map<String, Object>) record.getAttributes().get(Attribute.QUERY_FEATURES);
+                StringBuilder featureJson = new StringBuilder("{")
+                    .append(queryFeatures != null ? formatQueryFeatures(queryFeatures) : "");
+                if (featureJson.length() > 1) {
+                    featureJson.append(",");
+                }
+                
+                // Collect system metrics
+                Map<String, Object> systemMetrics = SystemMetricsCollector.collectSystemMetrics();
+                if (!systemMetrics.isEmpty()) {
+                    // Group system metrics by category for better organization
+                    Map<String, Map<String, Object>> categorizedMetrics = new HashMap<>();
+                    
+                    // Define categories and their prefixes
+                    String[][] categories = {
+                        {"os", "system_", "load_", "cpu_", "memory_", "disk_", "io_", "network_", "process_"},
+                        {"jvm", "jvm_"}
+                    };
+                    
+                    // Categorize metrics
+                    for (Map.Entry<String, Object> entry : systemMetrics.entrySet()) {
+                        String key = entry.getKey();
+                        Object value = entry.getValue();
+                        boolean categorized = false;
+                        
+                        for (String[] category : categories) {
+                            String categoryName = category[0];
+                            for (int i = 1; i < category.length; i++) {
+                                if (key.startsWith(category[i])) {
+                                    categorizedMetrics.computeIfAbsent(categoryName, k -> new HashMap<>())
+                                                     .put(key, value);
+                                    categorized = true;
+                                    break;
+                                }
+                            }
+                            if (categorized) break;
+                        }
+                        
+                        // If not categorized, put in "other"
+                        if (!categorized) {
+                            categorizedMetrics.computeIfAbsent("other", k -> new HashMap<>())
+                                             .put(key, value);
+                        }
+                    }
+                    
+                    // Format system metrics as JSON with categories
+                    StringBuilder systemMetricsJson = new StringBuilder();
+                    boolean firstCategory = true;
+                    
+                    for (Map.Entry<String, Map<String, Object>> category : categorizedMetrics.entrySet()) {
+                        if (!firstCategory) {
+                            systemMetricsJson.append(",");
+                        }
+                        firstCategory = false;
+                        
+                        systemMetricsJson.append('"').append(category.getKey()).append('"').append(":{")
+                                      .append(formatMetricsMap(category.getValue()))
+                                      .append("}");
+                    }
+                    
+                    // Add system metrics to the output
+                    if (systemMetricsJson.length() > 0) {
+                        featureJson.append("\"system_metrics\":{")
+                                  .append(systemMetricsJson)
+                                  .append("}");
+                    }
+                }
+                
+                // Add basic metrics
+                featureJson.append(String.format(
+                    ",\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d",
                     formattedDate,
                     queryType,
                     record.getMeasurement(MetricType.LATENCY).longValue(),
@@ -715,9 +791,15 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                     (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
                     getActiveShardCount(record),
                     record.getAttributes().get(Attribute.NODE_ID),
-                    getRequestedSize(record),
-                    queryJson
+                    getRequestedSize(record)
                 ));
+                
+                // Add the query at the end
+                featureJson.append(",\"query\":")
+                          .append(queryJson);
+                
+                featureJson.append("}\n");
+                writer.append(featureJson.toString());
             }
         } catch (IOException e) {
             log.error("Failed to write to CSV file: {}", e.getMessage());
@@ -890,6 +972,186 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             if (sourceStr.contains("ids")) return "IDS";
         }
         return "UNKNOWN";
+    }
+    
+    /**
+     * Format query features as JSON string for export
+     * 
+     * @param features Map of feature names to values
+     * @return Formatted JSON string of features
+     */
+    /**
+     * Format a map of metrics as a JSON string
+     * 
+     * @param metrics Map of metric names to values
+     * @return Formatted JSON string of metrics
+     */
+    private String formatMetricsMap(Map<String, Object> metrics) {
+        if (metrics == null || metrics.isEmpty()) {
+            return "";
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        
+        for (Map.Entry<String, Object> entry : metrics.entrySet()) {
+            if (!first) {
+                sb.append(",");
+            }
+            first = false;
+            
+            Object value = entry.getValue();
+            sb.append('"').append(entry.getKey()).append('"').append(':');
+            
+            if (value == null) {
+                sb.append("null");
+            } else if (value instanceof Number) {
+                sb.append(value);
+            } else if (value instanceof Boolean) {
+                sb.append(value);
+            } else if (value instanceof Set) {
+                // Handle Set by converting to JSON array
+                sb.append('[');
+                boolean firstItem = true;
+                for (Object item : (Set<?>) value) {
+                    if (!firstItem) {
+                        sb.append(',');
+                    }
+                    firstItem = false;
+                    
+                    if (item instanceof String) {
+                        sb.append('"').append(item).append('"');
+                    } else {
+                        sb.append(item);
+                    }
+                }
+                sb.append(']');
+            } else {
+                // Treat as string for other types
+                sb.append('"').append(value).append('"');
+            }
+        }
+        
+        return sb.toString();
+    }
+    
+    /**
+     * Format query features as JSON string for export
+     * 
+     * @param features Map of feature names to values
+     * @return Formatted JSON string of features
+     */
+    private String formatQueryFeatures(Map<String, Object> features) {
+        if (features == null || features.isEmpty()) {
+            return "";
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        
+        // Make sure we include all features, including the new ones
+        String[] importantFeatures = {
+            "query_depth", "boolean_clause_count", "field_count", 
+            "has_wildcards", "has_fuzzy_matching", "has_function_score",
+            "has_script_fields", "query_type_count", "aggregation_count",
+            "aggregation_complexity", "sort_field_count", "sort_complexity",
+            "query_complexity_score", "query_size_bytes", "field_complexity_score"
+        };
+        
+        // First add the important features in a specific order
+        for (String key : importantFeatures) {
+            if (features.containsKey(key)) {
+                if (!first) {
+                    sb.append(",");
+                }
+                first = false;
+                
+                Object value = features.get(key);
+                sb.append('"').append(key).append('"').append(':');
+                
+                if (value == null) {
+                    sb.append("null");
+                } else if (value instanceof Number) {
+                    sb.append(value);
+                } else if (value instanceof Boolean) {
+                    sb.append(value);
+                } else if (value instanceof Set) {
+                    // Handle Set by converting to JSON array
+                    sb.append('[');
+                    boolean firstItem = true;
+                    for (Object item : (Set<?>) value) {
+                        if (!firstItem) {
+                            sb.append(',');
+                        }
+                        firstItem = false;
+                        
+                        if (item instanceof String) {
+                            sb.append('"').append(item).append('"');
+                        } else {
+                            sb.append(item);
+                        }
+                    }
+                    sb.append(']');
+                } else {
+                    // Treat as string for other types
+                    sb.append('"').append(value).append('"');
+                }
+            }
+        }
+        
+        // Then add any remaining features
+        for (Map.Entry<String, Object> entry : features.entrySet()) {
+            String key = entry.getKey();
+            // Skip if already added
+            boolean alreadyAdded = false;
+            for (String importantKey : importantFeatures) {
+                if (key.equals(importantKey)) {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (alreadyAdded) {
+                continue;
+            }
+            
+            if (!first) {
+                sb.append(",");
+            }
+            first = false;
+            
+            Object value = entry.getValue();
+            sb.append('"').append(key).append('"').append(':');
+            
+            if (value == null) {
+                sb.append("null");
+            } else if (value instanceof Number) {
+                sb.append(value);
+            } else if (value instanceof Boolean) {
+                sb.append(value);
+            } else if (value instanceof Set) {
+                // Handle Set by converting to JSON array
+                sb.append('[');
+                boolean firstItem = true;
+                for (Object item : (Set<?>) value) {
+                    if (!firstItem) {
+                        sb.append(',');
+                    }
+                    firstItem = false;
+                    
+                    if (item instanceof String) {
+                        sb.append('"').append(item).append('"');
+                    } else {
+                        sb.append(item);
+                    }
+                }
+                sb.append(']');
+            } else {
+                // Treat as string for other types
+                sb.append('"').append(value).append('"');
+            }
+        }
+        
+        return sb.toString();
     }
 
 }

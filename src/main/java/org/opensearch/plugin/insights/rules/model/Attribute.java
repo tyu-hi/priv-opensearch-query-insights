@@ -77,7 +77,12 @@ public enum Attribute {
     /**
      * The cancelled of the search query, often used in live queries.
      */
-    IS_CANCELLED;
+    IS_CANCELLED,
+    
+    /**
+     * Query structure features for ML model training
+     */
+    QUERY_FEATURES;
 
     /**
      * Read an Attribute from a StreamInput
