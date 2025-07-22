@@ -970,6 +970,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             if (sourceStr.contains("regexp")) return "REGEXP";
             if (sourceStr.contains("exists")) return "EXISTS";
             if (sourceStr.contains("ids")) return "IDS";
+            // Added:
+            if (sourceStr.contains("nested")) return "NESTED";
+            if (sourceStr.contains("geo_polygon")) return "GEO_POLYGON";
+            if (sourceStr.contains("geo_distance")) return "GEO_DISTANCE";
+            if (sourceStr.contains("geo_bounding_box")) return "GEO_BOUNDING_BOX";
         }
         return "UNKNOWN";
     }
