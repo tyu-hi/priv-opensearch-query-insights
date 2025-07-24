@@ -90,7 +90,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
 
     // Added:
-    // For Query Export
+    // For Query Export to directory
     //private final String queryExportFilePath;
 
     // For writing to the same file to aggregate the workload data:
@@ -339,6 +339,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return excludedIndicesPattern.stream().anyMatch(pattern -> pattern.matcher(indexName).matches());
     }
 
+    // Added:
+    /**
+     * Construct SearchQueryRecord from search context and request context
+     * 
+     * @param context SearchPhaseContext containing search phase information
+     * @param searchRequestContext SearchRequestContext containing request details
+     */
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
         String indices = Optional.ofNullable(context.getRequest().indices())
             .map(arr -> String.join(",", arr))
@@ -459,6 +466,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
 
     // Added:
+    /**
+     * Export query data to configured export destination
+     * 
+     * @param record SearchQueryRecord containing query data to export
+     */
     private synchronized void exportQueryData(SearchQueryRecord record) {
         // Add debug logging to help diagnose issues with specific workloads
         Object source = record.getAttributes().get(Attribute.SOURCE);
@@ -476,7 +488,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
 
-    // Return shard count for indices in the query
+    // Added:
+    /**
+     * Get active shard count for indices in the query
+     * 
+     * @param record SearchQueryRecord containing query attributes
+     * @return int representing the total active shard count
+     */
     private int getActiveShardCount(SearchQueryRecord record) {
         ClusterState clusterState = clusterService.state();
         int activeShards = 0;
@@ -601,8 +619,12 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
 
-
-    // Added
+    // Added:
+    /**
+     * Write batch of query records to export file
+     * 
+     * @param records List of SearchQueryRecord to export
+     */
     private void writeQueryBatch(List<SearchQueryRecord> records) {
         try (java.io.FileWriter writer = new java.io.FileWriter(queryExportFilePath, true)) {
             for (SearchQueryRecord record : records) {
@@ -807,7 +829,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     }
 
 
-    // Attempt at returning document size
+    // Added:
+    /**
+     * Get requested size from query source
+     * 
+     * @param record SearchQueryRecord containing query attributes
+     * @return int representing the requested size or 0 if not found
+     */
     private int getRequestedSize(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
@@ -828,7 +856,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return 0; // Default size
     }
 
-    // Return exact document count for indices in the query
+    // Added:
+    /**
+     * Get document count for indices targeted by the query. Caches repeated indices.
+     * 
+     * @param record SearchQueryRecord containing query attributes
+     * @return long representing total document count across indices
+     */
     private long getDocumentCount(SearchQueryRecord record) {
         if (client == null) {
             return 0;
@@ -952,6 +986,13 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         }
     }
 
+    // Added:
+    /**
+     * Classify query type based on query source content
+     * 
+     * @param record SearchQueryRecord containing query attributes
+     * @return String representing the query type or "UNKNOWN"
+     */
     private String getQueryType(SearchQueryRecord record) {
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
@@ -970,7 +1011,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             if (sourceStr.contains("regexp")) return "REGEXP";
             if (sourceStr.contains("exists")) return "EXISTS";
             if (sourceStr.contains("ids")) return "IDS";
-            // Added:
+            // More:
             if (sourceStr.contains("nested")) return "NESTED";
             if (sourceStr.contains("geo_polygon")) return "GEO_POLYGON";
             if (sourceStr.contains("geo_distance")) return "GEO_DISTANCE";
@@ -979,17 +1020,12 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return "UNKNOWN";
     }
     
+    // Added:
     /**
      * Format query features as JSON string for export
      * 
      * @param features Map of feature names to values
      * @return Formatted JSON string of features
-     */
-    /**
-     * Format a map of metrics as a JSON string
-     * 
-     * @param metrics Map of metric names to values
-     * @return Formatted JSON string of metrics
      */
     private String formatMetricsMap(Map<String, Object> metrics) {
         if (metrics == null || metrics.isEmpty()) {
@@ -1040,6 +1076,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return sb.toString();
     }
     
+    // Added:
     /**
      * Format query features as JSON string for export
      * 
