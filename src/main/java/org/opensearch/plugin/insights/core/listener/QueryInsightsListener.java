@@ -1019,7 +1019,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             if (sourceStr.contains("geo_polygon")) return "GEO_POLYGON";
             if (sourceStr.contains("geo_distance")) return "GEO_DISTANCE";
             if (sourceStr.contains("geo_bounding_box")) return "GEO_BOUNDING_BOX";
-            if (sourceStr.contains("geo_bounding_box")) return "GEO_BOUNDING_BOX";
         }
         return "UNKNOWN";
     }
