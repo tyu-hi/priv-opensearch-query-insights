@@ -92,10 +92,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
     // Added:
     // For Query Export to directory
-    private final String queryExportFilePath;
+    //private final String queryExportFilePath;
 
     // For writing to the same file to aggregate the workload data:
-    //private final String queryExportFilePath = "SystemAndQueryMetrics.json";
+    private final String queryExportFilePath = "SystemAndQueryMetrics.json";
 
     private final List<SearchQueryRecord> queryBuffer = new ArrayList<>();
     private static final int BATCH_SIZE = 1;
@@ -137,8 +137,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         queryInsightsService.setQueryShapeGenerator(queryShapeGenerator);
 
         // Generate unique filename with readable timestamp
-        this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" +
-            DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
+        //this.queryExportFilePath = "BenchmarkOutputs/queryMetrics_" +
+        //   DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneOffset.UTC).format(Instant.now()) + ".json";
 
         // Setting endpoints set up for top n queries, including enabling top n queries, window size, and top n size
         // Expected metricTypes are Latency, CPU, and Memory.
@@ -392,15 +392,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             Map<Attribute, Object> attributes = new HashMap<>();
             attributes.put(Attribute.SEARCH_TYPE, request.searchType().toString().toLowerCase(Locale.ROOT));
             attributes.put(Attribute.SOURCE, request.source());
-            int totalShards = context.getNumShards();
-            attributes.put(Attribute.TOTAL_SHARDS, totalShards);
-            
-            // Debug logging for shard count discrepancy
-            int activeShards = getActiveShardCount(record);
-            if (totalShards != activeShards) {
-                log.debug("Shard count mismatch for indices {}: total_shards={}, active_shard_count={}", 
-                         indices, totalShards, activeShards);
-            }
+            attributes.put(Attribute.TOTAL_SHARDS, context.getNumShards());
             attributes.put(Attribute.INDICES, request.indices());
             attributes.put(Attribute.PHASE_LATENCY_MAP, searchRequestContext.phaseTookMap());
             attributes.put(Attribute.TASK_RESOURCE_USAGES, tasksResourceUsages);
@@ -1006,6 +998,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         Object source = record.getAttributes().get(Attribute.SOURCE);
         if (source != null) {
             String sourceStr = source.toString().toLowerCase();
+            if (sourceStr.contains("aggregations")) return "AGGREGATION";
+            if (sourceStr.contains("function_score")) return "FUNCTION_SCORE";
+            if (sourceStr.contains("script_score")) return "SCRIPT_SCORE";
+            if (sourceStr.contains("nested")) return "NESTED";
             if (sourceStr.contains("range")) return "RANGE";
             if (sourceStr.contains("match_all")) return "MATCH_ALL";
             if (sourceStr.contains("match_phrase")) return "MATCH_PHRASE";
@@ -1020,10 +1016,9 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             if (sourceStr.contains("regexp")) return "REGEXP";
             if (sourceStr.contains("exists")) return "EXISTS";
             if (sourceStr.contains("ids")) return "IDS";
-            // More:
-            if (sourceStr.contains("nested")) return "NESTED";
             if (sourceStr.contains("geo_polygon")) return "GEO_POLYGON";
             if (sourceStr.contains("geo_distance")) return "GEO_DISTANCE";
+            if (sourceStr.contains("geo_bounding_box")) return "GEO_BOUNDING_BOX";
             if (sourceStr.contains("geo_bounding_box")) return "GEO_BOUNDING_BOX";
         }
         return "UNKNOWN";
