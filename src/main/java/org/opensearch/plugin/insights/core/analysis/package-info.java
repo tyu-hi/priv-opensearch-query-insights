@@ -1,4 +1,3 @@
-package org.opensearch.plugin.insights.core.exporter.analysis;
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
