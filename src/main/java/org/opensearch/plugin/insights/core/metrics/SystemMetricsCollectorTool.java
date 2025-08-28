@@ -27,12 +27,6 @@ public class SystemMetricsCollectorTool {
     private static final int TOTAL_SAMPLES = 12; // 1 minute of samples at 5-second intervals
 
     public static void main(String[] args) {
-        // System.out.println("Starting System Metrics Collector Tool");
-        // System.out.println("Collecting " + TOTAL_SAMPLES + " samples at " + SAMPLE_INTERVAL_SECONDS + "-second intervals");
-        // System.out.println("Output will be written to " + OUTPUT_FILE);
-
-        // Print initial metrics
-        // System.out.println("\nInitial metrics sample:");
         SystemMetricsUtil.printSystemMetrics();
 
         // Schedule periodic collection
@@ -45,8 +39,6 @@ public class SystemMetricsCollectorTool {
             Runnable task = () -> {
                 try {
                     sampleCount[0]++;
-                    // System.out.println("\nCollecting sample " + sampleCount[0] + " of " + TOTAL_SAMPLES);
-
                     Map<String, Object> metrics = SystemMetricsCollector.collectSystemMetrics();
                     String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
 
@@ -90,7 +82,6 @@ public class SystemMetricsCollectorTool {
                         writer.write("]\n");
                         writer.flush();
                         scheduler.shutdown();
-                        // System.out.println("\nCollection complete. Results written to " + OUTPUT_FILE);
                     }
                 } catch (Exception e) {
                     System.err.println("Error collecting metrics: " + e.getMessage());
