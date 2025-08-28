@@ -116,6 +116,21 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     public QueryInsightsListener(
         final ClusterService clusterService,
         final QueryInsightsService queryInsightsService,
+        boolean initiallyEnabled
+    ) {
+        this(clusterService, queryInsightsService, null, initiallyEnabled);
+    }
+
+    /**
+     * Constructor for QueryInsightsListener
+     *
+     * @param clusterService       The Node's cluster service.
+     * @param queryInsightsService The topQueriesByLatencyService associated with this listener
+     * @param initiallyEnabled Is the listener initially enabled/disabled
+     */
+    public QueryInsightsListener(
+        final ClusterService clusterService,
+        final QueryInsightsService queryInsightsService,
         final Client client,
         boolean initiallyEnabled
     ) {
