@@ -25,8 +25,8 @@ public class SystemMetricsUtil {
         // Sort metrics by name for easier reading
         Map<String, Object> sortedMetrics = new TreeMap<>(metrics);
 
-        //System.out.println("=== System Metrics ===");
-        //System.out.println("Total metrics collected: " + sortedMetrics.size());
+        // System.out.println("=== System Metrics ===");
+        // System.out.println("Total metrics collected: " + sortedMetrics.size());
 
         // Group metrics by prefix for better organization
         Map<String, StringBuilder> groups = new TreeMap<>();
@@ -40,10 +40,10 @@ public class SystemMetricsUtil {
         }
 
         // Print each group
-        //for (Map.Entry<String, StringBuilder> group : groups.entrySet()) {
-            //System.out.println("--- " + group.getKey() + " ---");
-            //System.out.print(group.getValue().toString());
-        //}
+        // for (Map.Entry<String, StringBuilder> group : groups.entrySet()) {
+        // System.out.println("--- " + group.getKey() + " ---");
+        // System.out.print(group.getValue().toString());
+        // }
     }
 
     /**
