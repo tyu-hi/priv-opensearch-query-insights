@@ -10,6 +10,7 @@ package org.opensearch.plugin.insights.core.listener;
 
 import static org.opensearch.plugin.insights.rules.model.SearchQueryRecord.DEFAULT_TOP_N_QUERY_MAP;
 import static org.opensearch.plugin.insights.settings.QueryCategorizationSettings.SEARCH_QUERY_METRICS_ENABLED_SETTING;
+import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.QUERY_INSIGHTS_EXECUTOR;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.TOP_N_QUERIES_GROUPING_FIELD_NAME;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.TOP_N_QUERIES_GROUPING_FIELD_TYPE;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.TOP_N_QUERIES_GROUP_BY;
@@ -18,8 +19,6 @@ import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getT
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNSizeSetting;
 import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.getTopNWindowSizeSetting;
 
-// Added
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,7 +26,6 @@ import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -35,33 +33,30 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-// Added
 import org.opensearch.action.admin.indices.stats.IndexStats;
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
-import org.opensearch.client.Client;
-import org.opensearch.cluster.routing.IndexRoutingTable;
-import org.opensearch.cluster.routing.IndexShardRoutingTable;
-import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.action.search.SearchPhaseContext;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchRequestContext;
 import org.opensearch.action.search.SearchRequestOperationsListener;
 import org.opensearch.action.search.SearchTask;
+import org.opensearch.client.Client;
 import org.opensearch.cluster.ClusterState;
-//import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.routing.IndexRoutingTable;
+import org.opensearch.cluster.routing.IndexShardRoutingTable;
+import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.tasks.resourcetracker.TaskResourceInfo;
+import org.opensearch.plugin.insights.core.analysis.QueryStructureAnalyzer;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetric;
 import org.opensearch.plugin.insights.core.metrics.OperationalMetricsCounter;
 import org.opensearch.plugin.insights.core.metrics.SystemMetricsCollector;
-import org.opensearch.plugin.insights.core.analysis.QueryStructureAnalyzer;
 import org.opensearch.plugin.insights.core.service.QueryInsightsService;
 import org.opensearch.plugin.insights.core.service.categorizer.QueryShapeGenerator;
 import org.opensearch.plugin.insights.rules.model.Attribute;
@@ -69,8 +64,6 @@ import org.opensearch.plugin.insights.rules.model.Measurement;
 import org.opensearch.plugin.insights.rules.model.MetricType;
 import org.opensearch.plugin.insights.rules.model.SearchQueryRecord;
 import org.opensearch.plugin.insights.settings.QueryInsightsSettings;
-import static org.opensearch.plugin.insights.settings.QueryInsightsSettings.QUERY_INSIGHTS_EXECUTOR;
-import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.tasks.Task;
 import reactor.util.annotation.NonNull;
 
@@ -89,7 +82,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
     private boolean groupingFieldNameEnabled;
     private boolean groupingFieldTypeEnabled;
     private final QueryShapeGenerator queryShapeGenerator;
-
 
     // Added:
     // For Query Export to directory
@@ -274,13 +266,17 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         if (request != null && request.source() != null) {
             String sourceStr = request.source().toString().toLowerCase();
             // Don't skip benchmark queries
-            if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") ||
-                sourceStr.contains("nested") || sourceStr.contains("join_field") ||
-                sourceStr.contains("answer") || sourceStr.contains("comment") ||
-                sourceStr.contains("question") || sourceStr.contains("tag") ||
-                sourceStr.contains("event_type") || sourceStr.contains("sonested")) {
-                log.debug("Not skipping benchmark query: {}",
-                          sourceStr.substring(0, Math.min(100, sourceStr.length())) + "...");
+            if (sourceStr.contains("name.raw")
+                || sourceStr.contains("feature_class")
+                || sourceStr.contains("nested")
+                || sourceStr.contains("join_field")
+                || sourceStr.contains("answer")
+                || sourceStr.contains("comment")
+                || sourceStr.contains("question")
+                || sourceStr.contains("tag")
+                || sourceStr.contains("event_type")
+                || sourceStr.contains("sonested")) {
+                log.debug("Not skipping benchmark query: {}", sourceStr.substring(0, Math.min(100, sourceStr.length())) + "...");
                 return false;
             }
         }
@@ -312,9 +308,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
      * @param searchRequestContext SearchRequestContext containing request details
      */
     private void constructSearchQueryRecord(final SearchPhaseContext context, final SearchRequestContext searchRequestContext) {
-        String indices = Optional.ofNullable(context.getRequest().indices())
-            .map(arr -> String.join(",", arr))
-            .orElse("unknown");
+        String indices = Optional.ofNullable(context.getRequest().indices()).map(arr -> String.join(",", arr)).orElse("unknown");
         log.info("Processing search request for indices: {}", indices);
 
         if (skipSearchRequest(searchRequestContext)) {
@@ -439,17 +433,16 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         final String baseDir = "/hdd1/mnt/env/root/apollo/env/";
         final String dirPrefix = "swift-us-east-1-integ-OS_2_";
         final String filePath = "/var/es/data/SystemAndQueryMetrics.json";
-        
+
         try {
             Path basePath = Paths.get(baseDir);
             if (Files.exists(basePath) && Files.isDirectory(basePath)) {
                 // Find the first directory that starts with the prefix
                 try (java.util.stream.Stream<Path> paths = Files.list(basePath)) {
-                    java.util.Optional<Path> matchingDir = paths
-                        .filter(Files::isDirectory)
+                    java.util.Optional<Path> matchingDir = paths.filter(Files::isDirectory)
                         .filter(path -> path.getFileName().toString().startsWith(dirPrefix))
                         .findFirst();
-                    
+
                     if (matchingDir.isPresent()) {
                         String dynamicPath = matchingDir.get().toString() + filePath;
                         log.info("Using dynamic export path: {}", dynamicPath);
@@ -460,7 +453,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         } catch (Exception e) {
             log.warn("Failed to find dynamic directory under {}: {}", baseDir, e.getMessage());
         }
-        
+
         // Fallback to hardcoded path
         String fallbackPath = baseDir + "swift-us-east-1-integ-OS_2_19AMI-ES2-p001" + filePath;
         log.warn("Using fallback export path: {}", fallbackPath);
@@ -479,8 +472,11 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
         String indicesStr = (indices != null && indices.length > 0) ? String.join(",", indices) : "_all";
 
-        log.debug("Exporting query data for indices: {}, query: {}", indicesStr,
-                 source != null ? source.toString().substring(0, Math.min(100, source.toString().length())) + "..." : "null");
+        log.debug(
+            "Exporting query data for indices: {}, query: {}",
+            indicesStr,
+            source != null ? source.toString().substring(0, Math.min(100, source.toString().length())) + "..." : "null"
+        );
 
         queryBuffer.add(record);
         if (queryBuffer.size() >= BATCH_SIZE) {
@@ -503,8 +499,9 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
 
         // Handle special case for "_all" or empty indices
-        boolean isAllIndices = indices == null || indices.length == 0 ||
-            (indices.length == 1 && (indices[0] == null || indices[0].equals("_all")));
+        boolean isAllIndices = indices == null
+            || indices.length == 0
+            || (indices.length == 1 && (indices[0] == null || indices[0].equals("_all")));
 
         if (isAllIndices) {
             // Try to detect the actual index from the query
@@ -513,8 +510,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 String sourceStr = source.toString();
                 String detectedIndex = null;
 
-                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") ||
-                    sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
+                if (sourceStr.contains("name.raw")
+                    || sourceStr.contains("feature_class")
+                    || sourceStr.contains("feature_code")
+                    || sourceStr.contains("country_code")) {
                     detectedIndex = "geonames";
                 } else if (sourceStr.contains("tag") && sourceStr.contains("term")) {
                     // This is likely the stackexchange/nested benchmark
@@ -529,7 +528,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
                             for (IndexRoutingTable indexRoutingTable : clusterState.routingTable()) {
                                 if (indexRoutingTable.getIndex().getName().startsWith(".")) continue; // Skip system indices
-                                if (indexRoutingTable.getIndex().getName().startsWith("top_queries")) continue; // Skip query insights indices
+                                if (indexRoutingTable.getIndex().getName().startsWith("top_queries")) continue; // Skip query insights
+                                                                                                                // indices
 
                                 int activeShardCount = 0;
                                 for (IndexShardRoutingTable shardTable : indexRoutingTable) {
@@ -556,13 +556,17 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                         log.debug("Error detecting index for tag queries: {}", e.getMessage());
                         detectedIndex = "sonested";
                     }
-                } else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") ||
-                           sourceStr.contains("message") || sourceStr.contains("host")) {
-                    detectedIndex = "eventdata";
-                } else if (sourceStr.contains("sonested") || sourceStr.contains("song") ||
-                           sourceStr.contains("artist") || sourceStr.contains("album")) {
-                    detectedIndex = "sonested";
-                }
+                } else if (sourceStr.contains("event_type")
+                    || sourceStr.contains("timestamp")
+                    || sourceStr.contains("message")
+                    || sourceStr.contains("host")) {
+                        detectedIndex = "eventdata";
+                    } else if (sourceStr.contains("sonested")
+                        || sourceStr.contains("song")
+                        || sourceStr.contains("artist")
+                        || sourceStr.contains("album")) {
+                            detectedIndex = "sonested";
+                        }
 
                 if (detectedIndex != null) {
                     // Use the detected index
@@ -620,7 +624,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         return activeShards;
     }
 
-
     // Added:
     /**
      * Write batch of query records to export file
@@ -661,8 +664,10 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                         } else {
                             // Check for field patterns that might indicate the index
                             // For geonames benchmark
-                            if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") ||
-                                sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
+                            if (sourceStr.contains("name.raw")
+                                || sourceStr.contains("feature_class")
+                                || sourceStr.contains("feature_code")
+                                || sourceStr.contains("country_code")) {
                                 indicesStr = "geonames";
                             }
                             // For tag-based queries (likely stackexchange/nested benchmark)
@@ -706,24 +711,27 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                                 }
                             }
                             // For eventdata benchmark
-                            else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") ||
-                                     sourceStr.contains("message") || sourceStr.contains("host")) {
-                                indicesStr = "eventdata";
-                            }
-                            // For sonested benchmark
-                            else if (sourceStr.contains("sonested") || sourceStr.contains("song") ||
-                                     sourceStr.contains("artist") || sourceStr.contains("album")) {
-                                indicesStr = "sonested";
-                            }
-                            else {
-                                // Try to get index from task header if available
-                                String taskHeader = (String) record.getAttributes().get(Attribute.LABELS);
-                                if (taskHeader != null && taskHeader.toString().contains("geonames")) {
-                                    indicesStr = "geonames";
-                                } else {
-                                    indicesStr = "_all";
+                            else if (sourceStr.contains("event_type")
+                                || sourceStr.contains("timestamp")
+                                || sourceStr.contains("message")
+                                || sourceStr.contains("host")) {
+                                    indicesStr = "eventdata";
                                 }
-                            }
+                            // For sonested benchmark
+                            else if (sourceStr.contains("sonested")
+                                || sourceStr.contains("song")
+                                || sourceStr.contains("artist")
+                                || sourceStr.contains("album")) {
+                                    indicesStr = "sonested";
+                                } else {
+                                    // Try to get index from task header if available
+                                    String taskHeader = (String) record.getAttributes().get(Attribute.LABELS);
+                                    if (taskHeader != null && taskHeader.toString().contains("geonames")) {
+                                        indicesStr = "geonames";
+                                    } else {
+                                        indicesStr = "_all";
+                                    }
+                                }
                         }
                     } else {
                         indicesStr = "_all";
@@ -734,8 +742,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
                 // Get query features
                 Map<String, Object> queryFeatures = (Map<String, Object>) record.getAttributes().get(Attribute.QUERY_FEATURES);
-                StringBuilder featureJson = new StringBuilder("{")
-                    .append(queryFeatures != null ? formatQueryFeatures(queryFeatures) : "");
+                StringBuilder featureJson = new StringBuilder("{").append(queryFeatures != null ? formatQueryFeatures(queryFeatures) : "");
                 if (featureJson.length() > 1) {
                     featureJson.append(",");
                 }
@@ -748,9 +755,8 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
                     // Define categories and their prefixes
                     String[][] categories = {
-                        {"os", "system_", "load_", "cpu_", "memory_", "disk_", "io_", "network_", "process_"},
-                        {"jvm", "jvm_"}
-                    };
+                        { "os", "system_", "load_", "cpu_", "memory_", "disk_", "io_", "network_", "process_" },
+                        { "jvm", "jvm_" } };
 
                     // Categorize metrics
                     for (Map.Entry<String, Object> entry : systemMetrics.entrySet()) {
@@ -762,8 +768,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                             String categoryName = category[0];
                             for (int i = 1; i < category.length; i++) {
                                 if (key.startsWith(category[i])) {
-                                    categorizedMetrics.computeIfAbsent(categoryName, k -> new HashMap<>())
-                                                     .put(key, value);
+                                    categorizedMetrics.computeIfAbsent(categoryName, k -> new HashMap<>()).put(key, value);
                                     categorized = true;
                                     break;
                                 }
@@ -773,8 +778,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
                         // If not categorized, put in "other"
                         if (!categorized) {
-                            categorizedMetrics.computeIfAbsent("other", k -> new HashMap<>())
-                                             .put(key, value);
+                            categorizedMetrics.computeIfAbsent("other", k -> new HashMap<>()).put(key, value);
                         }
                     }
 
@@ -788,39 +792,41 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                         }
                         firstCategory = false;
 
-                        systemMetricsJson.append('"').append(category.getKey()).append('"').append(":{")
-                                      .append(formatMetricsMap(category.getValue()))
-                                      .append("}");
+                        systemMetricsJson.append('"')
+                            .append(category.getKey())
+                            .append('"')
+                            .append(":{")
+                            .append(formatMetricsMap(category.getValue()))
+                            .append("}");
                     }
 
                     // Add system metrics to the output
                     if (systemMetricsJson.length() > 0) {
-                        featureJson.append("\"system_metrics\":{")
-                                  .append(systemMetricsJson)
-                                  .append("}");
+                        featureJson.append("\"system_metrics\":{").append(systemMetricsJson).append("}");
                     }
                 }
 
                 // Add basic metrics
-                featureJson.append(String.format(
-                    ",\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d",
-                    formattedDate,
-                    queryType,
-                    record.getMeasurement(MetricType.LATENCY).longValue(),
-                    record.getMeasurement(MetricType.CPU).longValue(),
-                    record.getMeasurement(MetricType.MEMORY).longValue(),
-                    getDocumentCount(record),
-                    record.getAttributes().get(Attribute.SEARCH_TYPE),
-                    indicesStr,
-                    (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
-                    getActiveShardCount(record),
-                    record.getAttributes().get(Attribute.NODE_ID),
-                    getRequestedSize(record)
-                ));
+                featureJson.append(
+                    String.format(
+                        ",\"timestamp\":\"%s\",\"query_type\":\"%s\",\"latency_ms\":%d,\"cpu_nanos\":%d,\"memory_bytes\":%d,\"document_count\":%d,\"search_type\":\"%s\",\"indices\":\"%s\",\"total_shards\":%d,\"active_shard_count\":%d,\"node_id\":\"%s\",\"requested_size\":%d",
+                        formattedDate,
+                        queryType,
+                        record.getMeasurement(MetricType.LATENCY).longValue(),
+                        record.getMeasurement(MetricType.CPU).longValue(),
+                        record.getMeasurement(MetricType.MEMORY).longValue(),
+                        getDocumentCount(record),
+                        record.getAttributes().get(Attribute.SEARCH_TYPE),
+                        indicesStr,
+                        (Integer) record.getAttributes().get(Attribute.TOTAL_SHARDS),
+                        getActiveShardCount(record),
+                        record.getAttributes().get(Attribute.NODE_ID),
+                        getRequestedSize(record)
+                    )
+                );
 
                 // Add the query at the end
-                featureJson.append(",\"query\":")
-                          .append(queryJson);
+                featureJson.append(",\"query\":").append(queryJson);
 
                 featureJson.append("}\n");
                 writer.append(featureJson.toString());
@@ -829,7 +835,6 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             log.error("Failed to write to CSV file: {}", e.getMessage());
         }
     }
-
 
     // Added:
     /**
@@ -873,8 +878,9 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
         String[] indices = (String[]) record.getAttributes().get(Attribute.INDICES);
 
         // Handle special case for "_all" or empty indices
-        boolean isAllIndices = indices == null || indices.length == 0 ||
-            (indices.length == 1 && (indices[0] == null || "_all".equals(indices[0])));
+        boolean isAllIndices = indices == null
+            || indices.length == 0
+            || (indices.length == 1 && (indices[0] == null || "_all".equals(indices[0])));
 
         // Try to detect the actual index if it's _all
         String[] actualIndices = indices;
@@ -885,16 +891,18 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                 String sourceStr = source.toString();
 
                 // Detect index based on query fields
-                if (sourceStr.contains("name.raw") || sourceStr.contains("feature_class") ||
-                    sourceStr.contains("feature_code") || sourceStr.contains("country_code")) {
-                    actualIndices = new String[] {"geonames"};
+                if (sourceStr.contains("name.raw")
+                    || sourceStr.contains("feature_class")
+                    || sourceStr.contains("feature_code")
+                    || sourceStr.contains("country_code")) {
+                    actualIndices = new String[] { "geonames" };
                     isAllIndices = false;
                 } else if (sourceStr.contains("tag") && sourceStr.contains("term")) {
                     // This is likely the stackexchange/nested benchmark
                     // Check if sonested index exists and has documents
                     try {
                         if (clusterService.state().metadata().hasIndex("sonested")) {
-                            actualIndices = new String[] {"sonested"};
+                            actualIndices = new String[] { "sonested" };
                             isAllIndices = false;
                         } else {
                             // If no suitable index exists, use the index with the most documents
@@ -920,27 +928,31 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
                             }
 
                             if (bestIndex != null) {
-                                actualIndices = new String[] {bestIndex};
+                                actualIndices = new String[] { bestIndex };
                                 isAllIndices = false;
                             } else {
-                                actualIndices = new String[] {"sonested"};
+                                actualIndices = new String[] { "sonested" };
                                 isAllIndices = false;
                             }
                         }
                     } catch (Exception e) {
                         log.debug("Error detecting index for tag queries: {}", e.getMessage());
-                        actualIndices = new String[] {"sonested"};
+                        actualIndices = new String[] { "sonested" };
                         isAllIndices = false;
                     }
-                } else if (sourceStr.contains("event_type") || sourceStr.contains("timestamp") ||
-                           sourceStr.contains("message") || sourceStr.contains("host")) {
-                    actualIndices = new String[] {"eventdata"};
-                    isAllIndices = false;
-                } else if (sourceStr.contains("sonested") || sourceStr.contains("song") ||
-                           sourceStr.contains("artist") || sourceStr.contains("album")) {
-                    actualIndices = new String[] {"sonested"};
-                    isAllIndices = false;
-                }
+                } else if (sourceStr.contains("event_type")
+                    || sourceStr.contains("timestamp")
+                    || sourceStr.contains("message")
+                    || sourceStr.contains("host")) {
+                        actualIndices = new String[] { "eventdata" };
+                        isAllIndices = false;
+                    } else if (sourceStr.contains("sonested")
+                        || sourceStr.contains("song")
+                        || sourceStr.contains("artist")
+                        || sourceStr.contains("album")) {
+                            actualIndices = new String[] { "sonested" };
+                            isAllIndices = false;
+                        }
             }
         }
 
@@ -964,8 +976,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
             if (isAllIndices) {
                 // For _all, use the total count across all indices
-                totalCount = response.getTotal().getDocs() != null ?
-                    response.getTotal().getDocs().getCount() : 0;
+                totalCount = response.getTotal().getDocs() != null ? response.getTotal().getDocs().getCount() : 0;
             } else {
                 // Sum up document counts for each specific index in the query
                 for (String indexName : actualIndices) {
@@ -980,8 +991,7 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
             docCountCache.put(cacheKey, totalCount);
             return totalCount;
         } catch (Exception e) {
-            log.debug("Failed to get document count for indices {}: {}",
-                isAllIndices ? "_all" : String.join(",", indices), e.getMessage());
+            log.debug("Failed to get document count for indices {}: {}", isAllIndices ? "_all" : String.join(",", indices), e.getMessage());
             // Cache 0 to avoid repeated failures
             docCountCache.put(cacheKey, 0L);
             return 0;
@@ -1098,12 +1108,21 @@ public final class QueryInsightsListener extends SearchRequestOperationsListener
 
         // Make sure we include all features, including the new ones
         String[] importantFeatures = {
-            "query_depth", "boolean_clause_count", "field_count",
-            "has_wildcards", "has_fuzzy_matching", "has_function_score",
-            "has_script_fields", "query_type_count", "aggregation_count",
-            "aggregation_complexity", "sort_field_count", "sort_complexity",
-            "query_complexity_score", "query_size_bytes", "field_complexity_score"
-        };
+            "query_depth",
+            "boolean_clause_count",
+            "field_count",
+            "has_wildcards",
+            "has_fuzzy_matching",
+            "has_function_score",
+            "has_script_fields",
+            "query_type_count",
+            "aggregation_count",
+            "aggregation_complexity",
+            "sort_field_count",
+            "sort_complexity",
+            "query_complexity_score",
+            "query_size_bytes",
+            "field_complexity_score" };
 
         // First add the important features in a specific order
         for (String key : importantFeatures) {

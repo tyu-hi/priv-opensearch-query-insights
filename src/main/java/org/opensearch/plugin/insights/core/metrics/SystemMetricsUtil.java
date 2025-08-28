@@ -21,31 +21,31 @@ public class SystemMetricsUtil {
      */
     public static void printSystemMetrics() {
         Map<String, Object> metrics = SystemMetricsCollector.collectSystemMetrics();
-        
+
         // Sort metrics by name for easier reading
         Map<String, Object> sortedMetrics = new TreeMap<>(metrics);
-        
-        System.out.println("=== System Metrics ===");
-        System.out.println("Total metrics collected: " + sortedMetrics.size());
-        
+
+        //System.out.println("=== System Metrics ===");
+        //System.out.println("Total metrics collected: " + sortedMetrics.size());
+
         // Group metrics by prefix for better organization
         Map<String, StringBuilder> groups = new TreeMap<>();
-        
+
         for (Map.Entry<String, Object> entry : sortedMetrics.entrySet()) {
             String key = entry.getKey();
             String prefix = getMetricPrefix(key);
-            
+
             StringBuilder groupContent = groups.computeIfAbsent(prefix, k -> new StringBuilder());
             groupContent.append(String.format("  %-40s : %s%n", key, formatMetricValue(entry.getValue())));
         }
-        
+
         // Print each group
-        for (Map.Entry<String, StringBuilder> group : groups.entrySet()) {
-            System.out.println("--- " + group.getKey() + " ---");
-            System.out.print(group.getValue().toString());
-        }
+        //for (Map.Entry<String, StringBuilder> group : groups.entrySet()) {
+            //System.out.println("--- " + group.getKey() + " ---");
+            //System.out.print(group.getValue().toString());
+        //}
     }
-    
+
     /**
      * Get the prefix category for a metric name
      */
@@ -73,10 +73,10 @@ public class SystemMetricsUtil {
         } else if (metricName.startsWith("process_")) {
             return "Process";
         }
-        
+
         return "Other";
     }
-    
+
     /**
      * Format a metric value for display
      */
@@ -84,7 +84,7 @@ public class SystemMetricsUtil {
         if (value == null) {
             return "null";
         }
-        
+
         if (value instanceof Double) {
             Double doubleValue = (Double) value;
             if (doubleValue == (long) doubleValue.doubleValue()) {
@@ -93,7 +93,7 @@ public class SystemMetricsUtil {
                 return String.format("%.4f", doubleValue);
             }
         }
-        
+
         if (value instanceof Long) {
             long longValue = (Long) value;
             // Format byte values in a human-readable way
@@ -107,10 +107,10 @@ public class SystemMetricsUtil {
                 }
             }
         }
-        
+
         return value.toString();
     }
-    
+
     /**
      * Main method for testing
      */

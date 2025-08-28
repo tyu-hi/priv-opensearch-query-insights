@@ -66,10 +66,6 @@ public enum Attribute {
      */
     GROUP_BY,
     /**
-     * The description of the search query, often used in live queries.
-     */
-    DESCRIPTION,
-    /**
      * A map indicating for which metric type(s) this record was in the Top N
      */
     TOP_N_QUERY,
@@ -78,7 +74,7 @@ public enum Attribute {
      * The cancelled of the search query, often used in live queries.
      */
     IS_CANCELLED,
-    
+
     /**
      * Query structure features for ML model training
      */
